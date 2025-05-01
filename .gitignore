@@ -1,174 +1,1446 @@
-# Byte-compiled / optimized / DLL files
-__pycache__/
-*.py[cod]
-*$py.class
+import logging
+import json
+import os
+from datetime import datetime, timedelta
+from io import BytesIO
+import base64
+import numpy as np
+import matplotlib.pyplot as plt
+from flask import Flask, request, render_template_string
 
-# C extensions
-*.so
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-# Distribution / packaging
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
+app = Flask(__name__)
+app.secret_key = "your_secret_key"
 
-# PyInstaller
-#  Usually these files are written by a python script from a template
-#  before PyInstaller builds the exe, so as to inject date/other infos into it.
-*.manifest
-*.spec
+FORECAST_FILE = "C:/Users/user/PycharmProjects/GPT_Serve/forecast_data.json"
+CURRENCIES = ["RUB", "USD", "KZT"]
 
-# Installer logs
-pip-log.txt
-pip-delete-this-directory.txt
+def init_forecast_file():
+    try:
+        if not os.path.exists(FORECAST_FILE):
+            with open(FORECAST_FILE, "w", encoding="utf-8") as f:
+                json.dump([], f)
+    except Exception as e:
+        logger.error(f"Ошибка инициализации файла прогнозов: {e}")
+        raise
 
-# Unit test / coverage reports
-htmlcov/
-.tox/
-.nox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.py,cover
-.hypothesis/
-.pytest_cache/
-cover/
+def save_forecast(crop, avg_temp, total_precipitation, area, soil_type, fertilizer_level, yield_result,
+                  location="Неизвестно"):
+    try:
+        init_forecast_file()
+        with open(FORECAST_FILE, "r", encoding="utf-8") as f:
+            forecasts = json.load(f)
+        forecasts.append({
+            "crop": crop,
+            "avg_temp": avg_temp,
+            "total_precipitation": total_precipitation,
+            "area": area,
+            "soil_type": soil_type,
+            "fertilizer_level": fertilizer_level,
+            "yield_per_ha": yield_result["yield_per_ha"],
+            "total_yield": yield_result["total_yield"],
+            "temp_adjustment": yield_result["temp_adjustment"],
+            "precip_adjustment": yield_result["precip_adjustment"],
+            "soil_adjustment": yield_result["soil_adjustment"],
+            "fertilizer_adjustment": yield_result["fertilizer_adjustment"],
+            "yield_category": yield_result["yield_category"],
+            "location": location,
+            "timestamp": str(np.datetime64("now"))
+        })
+        with open(FORECAST_FILE, "w", encoding="utf-8") as f:
+            json.dump(forecasts, f, ensure_ascii=False, indent=2)
+        return True, None
+    except Exception as e:
+        return False, str(e)
 
-# Translations
-*.mo
-*.pot
+def get_forecast_history():
+    try:
+        init_forecast_file()
+        with open(FORECAST_FILE, "r", encoding="utf-8") as f:
+            forecasts = json.load(f)
+        current_time = np.datetime64("now")
+        threshold_time = current_time - np.timedelta64(30, 'D')
+        forecasts = [f for f in forecasts if np.datetime64(f["timestamp"]) > threshold_time]
+        with open(FORECAST_FILE, "w", encoding="utf-8") as f:
+            json.dump(forecasts, f, ensure_ascii=False, indent=2)
+        return forecasts
+    except Exception as e:
+        logger.error(f"Ошибка чтения истории прогнозов: {e}")
+        return []
 
-# Django stuff:
-*.log
-local_settings.py
-db.sqlite3
-db.sqlite3-journal
+def clear_forecast_history():
+    try:
+        init_forecast_file()
+        with open(FORECAST_FILE, "w", encoding="utf-8") as f:
+            json.dump([], f)
+        return True, None
+    except Exception as e:
+        logger.error(f"Ошибка очистки истории прогнозов: {e}")
+        return False, str(e)
 
-# Flask stuff:
-instance/
-.webassets-cache
+def generate_yield_plot(crop, yield_data):
+    try:
+        plt.figure(figsize=(8, 6))
+        plt.plot(yield_data["temp_range"], yield_data["yield_values"], 'b-', label=f'Урожайность {crop}')
+        plt.title(f'Прогноз урожайности для {crop}')
+        plt.xlabel('Средняя температура (°C)')
+        plt.ylabel('Урожайность (т/га)')
+        plt.grid(True)
+        plt.legend()
 
-# Scrapy stuff:
-.scrapy
+        buffer = BytesIO()
+        plt.savefig(buffer, format='png')
+        buffer.seek(0)
+        plot_data = base64.b64encode(buffer.getvalue()).decode('utf-8')
+        plt.close()
+        return plot_data
+    except Exception as e:
+        logger.error(f"Ошибка генерации графика: {e}")
+        return None
 
-# Sphinx documentation
-docs/_build/
+def forecast_yield(crop, avg_temp, total_precipitation, area, soil_type, fertilizer_level):
+    try:
+        soil_factors = {
+            "выщелоченные черноземы": 1.2, "обыкновенные черноземы": 1.15, "южные черноземы": 1.1,
+            "карбонатные черноземы": 1.05, "солонцеватые черноземы": 0.95, "лугово-черноземные": 1.1,
+            "черноземы с низким гумусом": 1.0,
+            "темно-каштановые": 0.9, "каштановые типичные": 0.85, "светло-каштановые": 0.8,
+            "солонцеватые темно-каштановые": 0.75, "солонцеватые каштановые": 0.7,
+            "солонцеватые светло-каштановые": 0.65, "карбонатные темно-каштановые": 0.85,
+            "карбонатные каштановые": 0.8, "карбонатные светло-каштановые": 0.75, "лугово-каштановые": 0.9,
+            "бурые пустынные": 0.7, "серо-бурые пустынные": 0.65, "солонцеватые бурые": 0.6,
+            "солонцеватые серо-бурые": 0.55, "карбонатные бурые": 0.65, "карбонатные серо-бурые": 0.6,
+            "песчаные бурые": 0.55, "гипсовые серо-бурые": 0.5,
+            "светлые сероземы": 0.75, "типичные сероземы": 0.8, "темные сероземы": 0.85,
+            "орошаемые сероземы": 0.9, "солонцеватые сероземы": 0.65, "карбонатные сероземы": 0.7,
+            "аллювиально-луговые": 0.95, "аллювиально-болотные": 0.85, "аллювиально-дерновые": 0.9,
+            "аллювиально-песчаные": 0.7, "аллювиально-глинистые": 0.8,
+            "горно-черноземные": 1.0, "горно-каштановые": 0.85, "горно-бурые": 0.7, "горно-сероземы": 0.75,
+            "горно-луговые": 0.95, "горно-степные": 0.9, "горно-лесные": 0.85, "горно-тундровые": 0.6,
+            "песчаные почвы": 0.5, "солончаки": 0.4, "солонцы": 0.45, "такыры": 0.5,
+            "лугово-болотные": 0.8, "серые лесные": 0.9, "тугаи": 0.85, "пойменные": 0.9
+        }
 
-# PyBuilder
-.pybuilder/
-target/
+        crop_coefficients = {
+            "Морковь": {
+                "base_yield": 30, "temp_factor": 0.5, "precip_factor": 0.02, "optimal_temp": 20, "optimal_precip": 500,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.7, "средний": 1.0, "высокий": 1.2}
+            },
+            "Картофель": {
+                "base_yield": 25, "temp_factor": 0.4, "precip_factor": 0.015, "optimal_temp": 18, "optimal_precip": 600,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.6, "средний": 1.0, "высокий": 1.3}
+            },
+            "Томаты": {
+                "base_yield": 35, "temp_factor": 0.6, "precip_factor": 0.018, "optimal_temp": 22, "optimal_precip": 550,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.65, "средний": 1.0, "высокий": 1.25}
+            },
+            "Пшеница": {
+                "base_yield": 40, "temp_factor": 0.4, "precip_factor": 0.015, "optimal_temp": 15, "optimal_precip": 400,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.6, "средний": 1.0, "высокий": 1.3}
+            },
+            "Ячмень": {
+                "base_yield": 35, "temp_factor": 0.4, "precip_factor": 0.015, "optimal_temp": 14, "optimal_precip": 350,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.6, "средний": 1.0, "высокий": 1.3}
+            },
+            "Рожь": {
+                "base_yield": 30, "temp_factor": 0.4, "precip_factor": 0.015, "optimal_temp": 12, "optimal_precip": 400,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.6, "средний": 1.0, "высокий": 1.3}
+            },
+            "Овёс": {
+                "base_yield": 30, "temp_factor": 0.4, "precip_factor": 0.015, "optimal_temp": 15, "optimal_precip": 450,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.6, "средний": 1.0, "высокий": 1.3}
+            },
+            "Кукуруза": {
+                "base_yield": 50, "temp_factor": 0.5, "precip_factor": 0.02, "optimal_temp": 25, "optimal_precip": 600,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.7, "средний": 1.0, "высокий": 1.2}
+            },
+            "Рис": {
+                "base_yield": 60, "temp_factor": 0.5, "precip_factor": 0.02, "optimal_temp": 30, "optimal_precip": 1000,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.7, "средний": 1.0, "высокий": 1.2}
+            },
+            "Гречиха": {
+                "base_yield": 20, "temp_factor": 0.4, "precip_factor": 0.015, "optimal_temp": 18, "optimal_precip": 400,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.6, "средний": 1.0, "высокий": 1.3}
+            },
+            "Подсолнечник": {
+                "base_yield": 25, "temp_factor": 0.5, "precip_factor": 0.02, "optimal_temp": 24, "optimal_precip": 500,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.7, "средний": 1.0, "высокий": 1.2}
+            },
+            "Соя": {
+                "base_yield": 30, "temp_factor": 0.5, "precip_factor": 0.02, "optimal_temp": 25, "optimal_precip": 600,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.7, "средний": 1.0, "высокий": 1.2}
+            },
+            "Горох": {
+                "base_yield": 25, "temp_factor": 0.4, "precip_factor": 0.015, "optimal_temp": 18, "optimal_precip": 500,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.6, "средний": 1.0, "высокий": 1.3}
+            },
+            "Фасоль": {
+                "base_yield": 20, "temp_factor": 0.4, "precip_factor": 0.015, "optimal_temp": 20, "optimal_precip": 500,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.6, "средний": 1.0, "высокий": 1.3}
+            },
+            "Чечевица": {
+                "base_yield": 18, "temp_factor": 0.4, "precip_factor": 0.015, "optimal_temp": 18, "optimal_precip": 400,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.6, "средний": 1.0, "высокий": 1.3}
+            },
+            "Нут": {
+                "base_yield": 20, "temp_factor": 0.4, "precip_factor": 0.015, "optimal_temp": 22, "optimal_precip": 400,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.6, "средний": 1.0, "высокий": 1.3}
+            },
+            "Свёкла сахарная": {
+                "base_yield": 40, "temp_factor": 0.5, "precip_factor": 0.02, "optimal_temp": 20, "optimal_precip": 500,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.7, "средний": 1.0, "высокий": 1.2}
+            },
+            "Свёкла столовая": {
+                "base_yield": 35, "temp_factor": 0.5, "precip_factor": 0.02, "optimal_temp": 18, "optimal_precip": 500,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.7, "средний": 1.0, "высокий": 1.2}
+            },
+            "Репа": {
+                "base_yield": 30, "temp_factor": 0.5, "precip_factor": 0.02, "optimal_temp": 16, "optimal_precip": 500,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.7, "средний": 1.0, "высокий": 1.2}
+            },
+            "Редис": {
+                "base_yield": 20, "temp_factor": 0.5, "precip_factor": 0.02, "optimal_temp": 15, "optimal_precip": 400,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.7, "средний": 1.0, "высокий": 1.2}
+            },
+            "Капуста белокочанная": {
+                "base_yield": 40, "temp_factor": 0.5, "precip_factor": 0.02, "optimal_temp": 18, "optimal_precip": 600,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.7, "средний": 1.0, "высокий": 1.2}
+            },
+            "Капуста цветная": {
+                "base_yield": 30, "temp_factor": 0.5, "precip_factor": 0.02, "optimal_temp": 20, "optimal_precip": 600,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.7, "средний": 1.0, "высокий": 1.2}
+            },
+            "Брокколи": {
+                "base_yield": 25, "temp_factor": 0.5, "precip_factor": 0.02, "optimal_temp": 18, "optimal_precip": 600,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.7, "средний": 1.0, "высокий": 1.2}
+            },
+            "Огурцы": {
+                "base_yield": 30, "temp_factor": 0.6, "precip_factor": 0.018, "optimal_temp": 25, "optimal_precip": 700,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.65, "средний": 1.0, "высокий": 1.25}
+            },
+            "Кабачки": {
+                "base_yield": 35, "temp_factor": 0.6, "precip_factor": 0.018, "optimal_temp": 22, "optimal_precip": 600,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.65, "средний": 1.0, "высокий": 1.25}
+            },
+            "Тыква": {
+                "base_yield": 40, "temp_factor": 0.6, "precip_factor": 0.018, "optimal_temp": 24, "optimal_precip": 600,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.65, "средний": 1.0, "высокий": 1.25}
+            },
+            "Перец сладкий": {
+                "base_yield": 30, "temp_factor": 0.6, "precip_factor": 0.018, "optimal_temp": 25, "optimal_precip": 600,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.65, "средний": 1.0, "высокий": 1.25}
+            },
+            "Перец острый": {
+                "base_yield": 25, "temp_factor": 0.6, "precip_factor": 0.018, "optimal_temp": 26, "optimal_precip": 600,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.65, "средний": 1.0, "высокий": 1.25}
+            },
+            "Баклажаны": {
+                "base_yield": 30, "temp_factor": 0.6, "precip_factor": 0.018, "optimal_temp": 25, "optimal_precip": 600,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.65, "средний": 1.0, "высокий": 1.25}
+            },
+            "Лук репчатый": {
+                "base_yield": 30, "temp_factor": 0.5, "precip_factor": 0.02, "optimal_temp": 20, "optimal_precip": 500,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.7, "средний": 1.0, "высокий": 1.2}
+            },
+            "Лук зелёный": {
+                "base_yield": 20, "temp_factor": 0.5, "precip_factor": 0.02, "optimal_temp": 18, "optimal_precip": 500,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.7, "средний": 1.0, "высокий": 1.2}
+            },
+            "Чеснок": {
+                "base_yield": 15, "temp_factor": 0.5, "precip_factor": 0.02, "optimal_temp": 18, "optimal_precip": 400,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.7, "средний": 1.0, "высокий": 1.2}
+            },
+            "Салат": {
+                "base_yield": 20, "temp_factor": 0.5, "precip_factor": 0.02, "optimal_temp": 16, "optimal_precip": 500,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.7, "средний": 1.0, "высокий": 1.2}
+            },
+            "Шпинат": {
+                "base_yield": 15, "temp_factor": 0.5, "precip_factor": 0.02, "optimal_temp": 15, "optimal_precip": 500,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.7, "средний": 1.0, "высокий": 1.2}
+            },
+            "Укроп": {
+                "base_yield": 10, "temp_factor": 0.5, "precip_factor": 0.02, "optimal_temp": 18, "optimal_precip": 400,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.7, "средний": 1.0, "высокий": 1.2}
+            },
+            "Петрушка": {
+                "base_yield": 10, "temp_factor": 0.5, "precip_factor": 0.02, "optimal_temp": 18, "optimal_precip": 400,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.7, "средний": 1.0, "высокий": 1.2}
+            },
+            "Кинза": {
+                "base_yield": 10, "temp_factor": 0.5, "precip_factor": 0.02, "optimal_temp": 20, "optimal_precip": 400,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.7, "средний": 1.0, "высокий": 1.2}
+            },
+            "Арбуз": {
+                "base_yield": 50, "temp_factor": 0.6, "precip_factor": 0.018, "optimal_temp": 28, "optimal_precip": 500,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.65, "средний": 1.0, "высокий": 1.25}
+            },
+            "Дыня": {
+                "base_yield": 40, "temp_factor": 0.6, "precip_factor": 0.018, "optimal_temp": 28, "optimal_precip": 500,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.65, "средний": 1.0, "высокий": 1.25}
+            },
+            "Яблоки": {
+                "base_yield": 30, "temp_factor": 0.5, "precip_factor": 0.02, "optimal_temp": 20, "optimal_precip": 600,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.7, "средний": 1.0, "высокий": 1.2}
+            },
+            "Груши": {
+                "base_yield": 25, "temp_factor": 0.5, "precip_factor": 0.02, "optimal_temp": 20, "optimal_precip": 600,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.7, "средний": 1.0, "высокий": 1.2}
+            },
+            "Сливы": {
+                "base_yield": 20, "temp_factor": 0.5, "precip_factor": 0.02, "optimal_temp": 20, "optimal_precip": 600,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.7, "средний": 1.0, "высокий": 1.2}
+            },
+            "Абрикосы": {
+                "base_yield": 20, "temp_factor": 0.5, "precip_factor": 0.02, "optimal_temp": 22, "optimal_precip": 500,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.7, "средний": 1.0, "высокий": 1.2}
+            },
+            "Персики": {
+                "base_yield": 25, "temp_factor": 0.5, "precip_factor": 0.02, "optimal_temp": 24, "optimal_precip": 500,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.7, "средний": 1.0, "высокий": 1.2}
+            },
+            "Виноград": {
+                "base_yield": 20, "temp_factor": 0.5, "precip_factor": 0.02, "optimal_temp": 22, "optimal_precip": 500,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.7, "средний": 1.0, "высокий": 1.2}
+            },
+            "Клубника": {
+                "base_yield": 15, "temp_factor": 0.5, "precip_factor": 0.02, "optimal_temp": 20, "optimal_precip": 600,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.7, "средний": 1.0, "высокий": 1.2}
+            },
+            "Малина": {
+                "base_yield": 10, "temp_factor": 0.5, "precip_factor": 0.02, "optimal_temp": 20, "optimal_precip": 600,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.7, "средний": 1.0, "высокий": 1.2}
+            },
+            "Смородина": {
+                "base_yield": 10, "temp_factor": 0.5, "precip_factor": 0.02, "optimal_temp": 18, "optimal_precip": 600,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.7, "средний": 1.0, "высокий": 1.2}
+            },
+            "Крыжовник": {
+                "base_yield": 10, "temp_factor": 0.5, "precip_factor": 0.02, "optimal_temp": 18, "optimal_precip": 600,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.7, "средний": 1.0, "высокий": 1.2}
+            },
+            "Голубика": {
+                "base_yield": 8, "temp_factor": 0.5, "precip_factor": 0.02, "optimal_temp": 18, "optimal_precip": 600,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.7, "средний": 1.0, "высокий": 1.2}
+            },
+            "Ежевика": {
+                "base_yield": 10, "temp_factor": 0.5, "precip_factor": 0.02, "optimal_temp": 20, "optimal_precip": 600,
+                "soil_factors": soil_factors,
+                "fertilizer_factors": {"низкий": 0.7, "средний": 1.0, "высокий": 1.2}
+            }
+        }
 
-# Jupyter Notebook
-.ipynb_checkpoints
+        if crop not in crop_coefficients:
+            return None, f"Культура '{crop}' не поддерживается для прогнозирования"
 
-# IPython
-profile_default/
-ipython_config.py
+        coeffs = crop_coefficients[crop]
+        base_yield = coeffs["base_yield"]
+        temp_factor = coeffs["temp_factor"]
+        precip_factor = coeffs["precip_factor"]
+        optimal_temp = coeffs["optimal_temp"]
+        optimal_precip = coeffs["optimal_precip"]
+        soil_factor = coeffs["soil_factors"].get(soil_type, 1.0)
+        fertilizer_factor = coeffs["fertilizer_factors"].get(fertilizer_level, 1.0)
 
-# pyenv
-#   For a library or package, you might want to ignore these files since the code is
-#   intended to run in multiple environments; otherwise, check them in:
-# .python-version
+        temp_deviation = abs(avg_temp - optimal_temp)
+        temp_adjustment = max(0, 1 - temp_deviation * temp_factor)
 
-# pipenv
-#   According to pypa/pipenv#598, it is recommended to include Pipfile.lock in version control.
-#   However, in case of collaboration, if having platform-specific dependencies or dependencies
-#   having no cross-platform support, pipenv may install dependencies that don't work, or not
-#   install all needed dependencies.
-#Pipfile.lock
+        precip_deviation = abs(total_precipitation - optimal_precip)
+        precip_adjustment = max(0, 1 - precip_deviation * precip_factor)
 
-# UV
-#   Similar to Pipfile.lock, it is generally recommended to include uv.lock in version control.
-#   This is especially recommended for binary packages to ensure reproducibility, and is more
-#   commonly ignored for libraries.
-#uv.lock
+        adjusted_yield_per_ha = base_yield * temp_adjustment * precip_adjustment * soil_factor * fertilizer_factor
+        total_yield = adjusted_yield_per_ha * area
 
-# poetry
-#   Similar to Pipfile.lock, it is generally recommended to include poetry.lock in version control.
-#   This is especially recommended for binary packages to ensure reproducibility, and is more
-#   commonly ignored for libraries.
-#   https://python-poetry.org/docs/basic-usage/#commit-your-poetrylock-file-to-version-control
-#poetry.lock
+        yield_ratio = adjusted_yield_per_ha / base_yield
+        if yield_ratio >= 0.75:
+            yield_category = "excellent"
+        elif yield_ratio >= 0.4:
+            yield_category = "average"
+        else:
+            yield_category = "poor"
 
-# pdm
-#   Similar to Pipfile.lock, it is generally recommended to include pdm.lock in version control.
-#pdm.lock
-#   pdm stores project-wide configurations in .pdm.toml, but it is recommended to not include it
-#   in version control.
-#   https://pdm.fming.dev/latest/usage/project/#working-with-version-control
-.pdm.toml
-.pdm-python
-.pdm-build/
+        temp_range = np.linspace(avg_temp - 10, avg_temp + 10, 100)
+        yield_values = [
+            base_yield * max(0, 1 - abs(
+                t - optimal_temp) * temp_factor) * precip_adjustment * soil_factor * fertilizer_factor
+            for t in temp_range
+        ]
 
-# PEP 582; used by e.g. github.com/David-OConnor/pyflow and github.com/pdm-project/pdm
-__pypackages__/
+        return {
+            "yield_per_ha": round(adjusted_yield_per_ha, 2),
+            "total_yield": round(total_yield, 2),
+            "temp_adjustment": round(temp_adjustment * 100, 2),
+            "precip_adjustment": round(precip_adjustment * 100, 2),
+            "soil_adjustment": round(soil_factor * 100, 2),
+            "fertilizer_adjustment": round(fertilizer_factor * 100, 2),
+            "plot_data": {
+                "temp_range": temp_range.tolist(),
+                "yield_values": yield_values
+            },
+            "yield_category": yield_category
+        }, None
+    except Exception as e:
+        return None, f"Ошибка при прогнозировании: {str(e)}"
 
-# Celery stuff
-celerybeat-schedule
-celerybeat.pid
+def estimate_climate_by_location(latitude, longitude):
+    if latitude is None or longitude is None:
+        return 20.0, 500.0, "Неизвестно"
 
-# SageMath parsed files
-*.sage.py
+    if latitude > 50:
+        if 60 <= longitude <= 70:
+            location = "Северный Казахстан (например, Петропавловск)"
+            avg_temp = 15.0
+            total_precipitation = 400.0
+        elif longitude < 60:
+            location = "Северо-Западный Казахстан (например, Костанай)"
+            avg_temp = 16.0
+            total_precipitation = 350.0
+        else:
+            location = "Северо-Восточный Казахстан (например, Павлодар)"
+            avg_temp = 15.5
+            total_precipitation = 380.0
 
-# Environments
-.env
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
+    elif 48 <= latitude <= 50:
+        if longitude < 60:
+            location = "Западный Казахстан (например, Актобе)"
+            avg_temp = 18.0
+            total_precipitation = 300.0
+        elif 60 <= longitude <= 80:
+            if 50.5 <= latitude <= 51.5 and 70 <= longitude <= 72:
+                location = "Центральный Казахстан (Астана)"
+                avg_temp = 17.0
+                total_precipitation = 320.0
+            else:
+                location = "Центральный Казахстан (например, Караганда)"
+                avg_temp = 17.5
+                total_precipitation = 340.0
+        else:
+            location = "Восточный Казахстан (например, Усть-Каменогорск)"
+            avg_temp = 16.5
+            total_precipitation = 400.0
 
-# Spyder project settings
-.spyderproject
-.spyproject
+    else:
+        if 75 <= longitude <= 78:
+            location = "Южный Казахстан (Алматы)"
+            avg_temp = 22.0
+            total_precipitation = 600.0
+        elif 68 <= longitude <= 72:
+            location = "Южный Казахстан (например, Шымкент или Тараз)"
+            avg_temp = 23.0
+            total_precipitation = 550.0
+        else:
+            location = "Юго-Западный Казахстан (например, Кызылорда)"
+            avg_temp = 24.0
+            total_precipitation = 250.0
 
-# Rope project settings
-.ropeproject
+    return avg_temp, total_precipitation, location
 
-# mkdocs documentation
-/site
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>АгроПомощник - Прогноз урожайности</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease;
+        }
+        body {
+            font-family: 'Arial', sans-serif;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        body.light-theme {
+            background-color: #E6F0E4;
+            color: #333333;
+        }
+        body.dark-theme {
+            background-color: #2E2E2E;
+            color: #E0E0E0;
+        }
+        header {
+            padding: 20px 40px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+        }
+        body.light-theme header {
+            background-color: #FFFFFF;
+        }
+        body.dark-theme header {
+            background-color: #3C3C3C;
+        }
+        .logo {
+            font-family: 'Lobster', cursive;
+            font-size: 1.5em;
+        }
+        body.light-theme .logo {
+            color: #4CAF50;
+        }
+        body.dark-theme .logo {
+            color: #66BB6A;
+        }
+        nav ul {
+            list-style: none;
+            display: flex;
+            gap: 20px;
+            align-items: center;
+        }
+        nav ul li a {
+            text-decoration: none;
+            font-size: 1em;
+            transition: color 0.3s ease;
+        }
+        body.light-theme nav ul li a {
+            color: #333333;
+        }
+        body.dark-theme nav ul li a {
+            color: #E0E0E0;
+        }
+        nav ul li a:hover {
+            color: #4CAF50;
+        }
+        .contact-btn {
+            padding: 10px 20px;
+            border-radius: 25px;
+            text-decoration: none;
+            font-size: 1em;
+            transition: background-color 0.3s ease, box-shadow 0.3s ease;
+        }
+        body.light-theme .contact-btn {
+            background-color: #4CAF50;
+            color: #FFFFFF;
+        }
+        body.dark-theme .contact-btn {
+            background-color: #66BB6A;
+            color: #E0E0E0;
+        }
+        .contact-btn:hover {
+            background-color: #45A049;
+            box-shadow: 0 0 10px rgba(76, 175, 80, 0.5);
+        }
+        .main-section {
+            flex: 1;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background-size: cover;
+            background-position: center;
+            padding: 40px 20px;
+        }
+        .container {
+            padding: 40px;
+            border-radius: 15px;
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
+            width: 100%;
+            max-width: 900px;
+            transition: box-shadow 0.3s ease;
+        }
+        body.light-theme .container {
+            background-color: #FFFFFB;
+        }
+        body.dark-theme .container {
+            background-color: #3C3C3C;
+        }
+        .container:hover {
+            box-shadow: 0 5px 20px rgba(76, 175, 80, 0.3);
+        }
+        .current-time {
+            font-size: 1em;
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        body.light-theme .current-time {
+            color: #4CAF50;
+        }
+        body.dark-theme .current-time {
+            color: #66BB6A;
+        }
+        h1 {
+            font-family: 'Lobster', cursive;
+            font-size: 2em;
+            margin-bottom: 10px;
+            text-align: center;
+        }
+        body.light-theme h1 {
+            color: #333333;
+        }
+        body.dark-theme h1 {
+            color: #E0E0E0;
+        }
+        .welcome-message {
+            font-size: 1.1em;
+            margin-bottom: 30px;
+            text-align: center;
+        }
+        body.light-theme .welcome-message {
+            color: #666666;
+        }
+        body.dark-theme .welcome-message {
+            color: #B0B0B0;
+        }
+        .theme-toggle {
+            margin-bottom: 20px;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 8px;
+            font-size: 1em;
+            cursor: pointer;
+            transition: background-color 0.3s ease;
+        }
+        body.light-theme .theme-toggle {
+            background-color: #666;
+            color: #FFFFFF;
+        }
+        body.dark-theme .theme-toggle {
+            background-color: #888;
+            color: #E0E0E0;
+        }
+        form {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+        select, input[type="number"] {
+            width: 100%;
+            padding: 12px;
+            border-radius: 8px;
+            font-size: 1em;
+            transition: border-color 0.3s ease, box-shadow 0.3s ease;
+        }
+        body.light-theme select,
+        body.light-theme input[type="number"] {
+            border: 1px solid #E0E0E0;
+            background-color: #F9F9F9;
+            color: #333333;
+        }
+        body.dark-theme select,
+        body.dark-theme input[type="number"] {
+            border: 1px solid #555;
+            background-color: #4A4A4A;
+            color: #E0E0E0;
+        }
+        select:hover, input[type="number"]:hover {
+            box-shadow: 0 0 8px rgba(76, 175, 80, 0.3);
+        }
+        select:focus, input[type="number"]:focus {
+            outline: none;
+            border-color: #4CAF50;
+            box-shadow: 0 0 8px rgba(76, 175, 80, 0.5);
+        }
+        input[type="submit"], input[type="button"] {
+            width: 100%;
+            padding: 12px;
+            border: none;
+            border-radius: 8px;
+            font-size: 1em;
+            color: #FFFFFF;
+            cursor: pointer;
+            margin-top: 10px;
+            transition: background-color 0.3s ease, box-shadow 0.3s ease;
+        }
+        input[name="forecast_submit"] {
+            background-color: #4CAF50;
+        }
+        body.dark-theme input[name="forecast_submit"] {
+            background-color: #66BB6A;
+        }
+        input[name="forecast_submit"]:hover {
+            background-color: #45A049;
+            box-shadow: 0 0 10px rgba(76, 175, 80, 0.5);
+        }
+        input[name="location_button"] {
+            background-color: #2196F3;
+        }
+        body.dark-theme input[name="location_button"] {
+            background-color: #42A5F5;
+        }
+        input[name="location_button"]:hover {
+            background-color: #1E88E5;
+            box-shadow: 0 0 10px rgba(33, 150, 243, 0.5);
+        }
+        input[name="clear_history"] {
+            background-color: #FF5733;
+        }
+        body.dark-theme input[name="clear_history"] {
+            background-color: #EF5350;
+        }
+        input[name="clear_history"]:hover {
+            background-color: #E64A2F;
+            box-shadow: 0 0 10px rgba(255, 87, 51, 0.5);
+        }
+        .response {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 8px;
+        }
+        body.light-theme .response {
+            border: 1px solid #E0E0E0;
+        }
+        body.dark-theme .response {
+            border: 1px solid #555;
+        }
+        .response.excellent {
+            background-color: #B3E0B3;
+        }
+        body.dark-theme .response.excellent {
+            background-color: #4CAF50;
+        }
+        .response.average {
+            background-color: #FFE066;
+        }
+        body.dark-theme .response.average {
+            background-color: #FFB300;
+        }
+        .response.poor {
+            background-color: #FF9999;
+        }
+        body.dark-theme .response.poor {
+            background-color: #EF5350;
+        }
+        .response h3 {
+            margin-top: 0;
+            color: #4CAF50;
+        }
+        body.dark-theme .response h3 {
+            color: #66BB6A;
+        }
+        .chart-container {
+            margin-top: 20px;
+            width: 100%;
+        }
+        .plot-img {
+            max-width: 100%;
+            height: auto;
+            margin-top: 20px;
+        }
+        .history-table-container {
+            margin-top: 20px;
+            overflow-x: auto;
+            max-width: 100%;
+        }
+        .history-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        .history-table th, .history-table td {
+            padding: 10px;
+            text-align: left;
+            white-space: nowrap;
+        }
+        body.light-theme .history-table th,
+        body.light-theme .history-table td {
+            border: 1px solid #E0E0E0;
+        }
+        body.dark-theme .history-table th,
+        body.dark-theme .history-table td {
+            border: 1px solid #555;
+        }
+        .history-table th {
+            color: #FFFFFF;
+        }
+        body.light-theme .history-table th {
+            background-color: #4CAF50;
+        }
+        body.dark-theme .history-table th {
+            background-color: #66BB6A;
+        }
+        .history-table tr.excellent {
+            background-color: #B3E0B3;
+        }
+        body.dark-theme .history-table tr.excellent {
+            background-color: #4CAF50;
+        }
+        .history-table tr.average {
+            background-color: #FFE066;
+        }
+        body.dark-theme .history-table tr.average {
+            background-color: #FFB300;
+        }
+        .history-table tr.poor {
+            background-color: #FF9999;
+        }
+        body.dark-theme .history-table tr.poor {
+            background-color: #EF5350;
+        }
+        .filter-container {
+            margin-bottom: 10px;
+        }
+        .filter-container select {
+            padding: 8px;
+            border-radius: 5px;
+        }
+        body.light-theme .filter-container select {
+            border: 1px solid #E0E0E0;
+        }
+        body.dark-theme .filter-container select {
+            border: 1px solid #555;
+        }
+        @media (max-width: 600px) {
+            body {
+                font-size: 14px;
+            }
+            header {
+                flex-direction: column;
+                padding: 15px;
+                gap: 10px;
+            }
+            nav ul {
+                flex-direction: column;
+                gap: 10px;
+                text-align: center;
+            }
+            nav ul li a {
+                font-size: 0.9em;
+            }
+            .contact-btn {
+                padding: 8px 16px;
+                font-size: 0.9em;
+            }
+            .main-section {
+                padding: 20px 10px;
+            }
+            .container {
+                padding: 20px;
+                max-width: 100%;
+                margin: 0 10px;
+            }
+            h1 {
+                font-size: 1.5em;
+            }
+            .welcome-message {
+                font-size: 0.95em;
+                margin-bottom: 20px;
+            }
+            select, input[type="number"] {
+                font-size: 0.9em;
+                padding: 10px;
+            }
+            input[type="submit"], input[type="button"] {
+                font-size: 0.9em;
+                padding: 10px;
+            }
+            .response {
+                padding: 10px;
+            }
+            .response h3 {
+                font-size: 1.2em;
+            }
+            .history-table {
+                font-size: 0.8em;
+            }
+            .history-table th, .history-table td {
+                padding: 8px;
+            }
+        }
+    </style>
+</head>
+<body class="light-theme">
+    <header>
+        <div class="logo">АгроПомощник</div>
+        <nav>
+            <ul>
+                <li><a href="#">Город: Астана</a></li>
+                <li><a href="#">Почта: ivan.der2002@mail.ru</a></li>
+                <li><a href="#">Адрес: ул. Примерная, 123, Астана</a></li>
+                <li><a href="https://wa.me/77785155700" class="contact-btn" target="_blank">Связаться с нами</a></li>
+            </ul>
+        </nav>
+    </header>
+    <section class="main-section">
+        <div class="container">
+            <button class="theme-toggle" onclick="toggleTheme()">Переключить тему</button>
+            <div class="current-time" id="current-time"></div>
+            <h1>Прогноз урожайности</h1>
+            <div class="welcome-message">Оптимизируйте свои посевы с точными прогнозами</div>
+            <form method="POST" action="/forecast_yield" onsubmit="return validateForecastForm()">
+                <input type="number" name="avg_temp" id="avg-temp" placeholder="Средняя температура (°C)" step="0.1" required>
+                <input type="number" name="total_precipitation" id="total-precipitation" placeholder="Общее количество осадков (мм)" step="0.1" required>
+                <input type="number" name="area" id="area" placeholder="Площадь поля (га)" step="0.01" min="0.01" required>
+                <select name="soil_type" required>
+                    <option value="" disabled selected>Выберите тип почвы</option>
+                    <option value="выщелоченные черноземы">Выщелоченные черноземы</option>
+                    <option value="обыкновенные черноземы">Обыкновенные черноземы</option>
+                    <option value="южные черноземы">Южные черноземы</option>
+                    <option value="карбонатные черноземы">Карбонатные черноземы</option>
+                    <option value="солонцеватые черноземы">Солонцеватые черноземы</option>
+                    <option value="лугово-черноземные">Лугово-черноземные</option>
+                    <option value="черноземы с низким гумусом">Черноземы с низким гумусом</option>
+                    <option value="темно-каштановые">Темно-каштановые</option>
+                    <option value="каштановые типичные">Каштановые типичные</option>
+                    <option value="светло-каштановые">Светло-каштановые</option>
+                    <option value="солонцеватые темно-каштановые">Солонцеватые темно-каштановые</option>
+                    <option value="солонцеватые каштановые">Солонцеватые каштановые</option>
+                    <option value="солонцеватые светло-каштановые">Солонцеватые светло-каштановые</option>
+                    <option value="карбонатные темно-каштановые">Карбонатные темно-каштановые</option>
+                    <option value="карбонатные каштановые">Карбонатные каштановые</option>
+                    <option value="карбонатные светло-каштановые">Карбонатные светло-каштановые</option>
+                    <option value="лугово-каштановые">Лугово-каштановые</option>
+                    <option value="бурые пустынные">Бурые пустынные</option>
+                    <option value="серо-бурые пустынные">Серо-бурые пустынные</option>
+                    <option value="солонцеватые бурые">Солонцеватые бурые</option>
+                    <option value="солонцеватые серо-бурые">Солонцеватые серо-бурые</option>
+                    <option value="карбонатные бурые">Карбонатные бурые</option>
+                    <option value="карбонатные серо-бурые">Карбонатные серо-бурые</option>
+                    <option value="песчаные бурые">Песчаные бурые</option>
+                    <option value="гипсовые серо-бурые">Гипсовые серо-бурые</option>
+                    <option value="светлые сероземы">Светлые сероземы</option>
+                    <option value="типичные сероземы">Типичные сероземы</option>
+                    <option value="темные сероземы">Темные сероземы</option>
+                    <option value="орошаемые сероземы">Орошаемые сероземы</option>
+                    <option value="солонцеватые сероземы">Солонцеватые сероземы</option>
+                    <option value="карбонатные сероземы">Карбонатные сероземы</option>
+                    <option value="аллювиально-луговые">Аллювиально-луговые</option>
+                    <option value="аллювиально-болотные">Аллювиально-болотные</option>
+                    <option value="аллювиально-дерновые">Аллювиально-дерновые</option>
+                    <option value="аллювиально-песчаные">Аллювиально-песчаные</option>
+                    <option value="аллювиально-глинистые">Аллювиально-глинистые</option>
+                    <option value="горно-черноземные">Горно-черноземные</option>
+                    <option value="горно-каштановые">Горно-каштановые</option>
+                    <option value="горно-бурые">Горно-бурые</option>
+                    <option value="горно-сероземы">Горно-сероземы</option>
+                    <option value="горно-луговые">Горно-луговые</option>
+                    <option value="горно-степные">Горно-степные</option>
+                    <option value="горно-лесные">Горно-лесные</option>
+                    <option value="горно-тундровые">Горно-тундровые</option>
+                    <option value="песчаные почвы">Песчаные почвы</option>
+                    <option value="солончаки">Солончаки</option>
+                    <option value="солонцы">Солонцы</option>
+                    <option value="такыры">Такыры</option>
+                    <option value="лугово-болотные">Лугово-болотные</option>
+                    <option value="серые лесные">Серые лесные</option>
+                    <option value="тугаи">Тугаи</option>
+                    <option value="пойменные">Пойменные</option>
+                </select>
+                <select name="fertilizer_level" required>
+                    <option value="" disabled selected>Выберите уровень удобрений</option>
+                    <option value="низкий">Низкий</option>
+                    <option value="средний">Средний</option>
+                    <option value="высокий">Высокий</option>
+                </select>
+                <select name="crop" required>
+                    <option value="" disabled selected>Выберите культуру</option>
+                    <option value="Морковь">Морковь</option>
+                    <option value="Картофель">Картофель</option>
+                    <option value="Томаты">Томаты</option>
+                    <option value="Пшеница">Пшеница</option>
+                    <option value="Ячмень">Ячмень</option>
+                    <option value="Рожь">Рожь</option>
+                    <option value="Овёс">Овёс</option>
+                    <option value="Кукуруза">Кукуруза</option>
+                    <option value="Рис">Рис</option>
+                    <option value="Гречиха">Гречиха</option>
+                    <option value="Подсолнечник">Подсолнечник</option>
+                    <option value="Соя">Соя</option>
+                    <option value="Горох">Горох</option>
+                    <option value="Фасоль">Фасоль</option>
+                    <option value="Чечевица">Чечевица</option>
+                    <option value="Нут">Нут</option>
+                    <option value="Свёкла сахарная">Свёкла сахарная</option>
+                    <option value="Свёкла столовая">Свёкла столовая</option>
+                    <option value="Репа">Репа</option>
+                    <option value="Редис">Редис</option>
+                    <option value="Капуста белокочанная">Капуста белокочанная</option>
+                    <option value="Капуста цветная">Капуста цветная</option>
+                    <option value="Брокколи">Брокколи</option>
+                    <option value="Огурцы">Огурцы</option>
+                    <option value="Кабачки">Кабачки</option>
+                    <option value="Тыква">Тыква</option>
+                    <option value="Перец сладкий">Перец сладкий</option>
+                    <option value="Перец острый">Перец острый</option>
+                    <option value="Баклажаны">Баклажаны</option>
+                    <option value="Лук репчатый">Лук репчатый</option>
+                    <option value="Лук зелёный">Лук зелёный</option>
+                    <option value="Чеснок">Чеснок</option>
+                    <option value="Салат">Салат</option>
+                    <option value="Шпинат">Шпинат</option>
+                    <option value="Укроп">Укроп</option>
+                    <option value="Петрушка">Петрушка</option>
+                    <option value="Кинза">Кинза</option>
+                    <option value="Арбуз">Арбуз</option>
+                    <option value="Дыня">Дыня</option>
+                    <option value="Яблоки">Яблоки</option>
+                    <option value="Груши">Груши</option>
+                    <option value="Сливы">Сливы</option>
+                    <option value="Абрикосы">Абрикосы</option>
+                    <option value="Персики">Персики</option>
+                    <option value="Виноград">Виноград</option>
+                    <option value="Клубника">Клубника</option>
+                    <option value="Малина">Малина</option>
+                    <option value="Смородина">Смородина</option>
+                    <option value="Крыжовник">Крыжовник</option>
+                    <option value="Голубика">Голубика</option>
+                    <option value="Ежевика">Ежевика</option>
+                </select>
+                <input type="submit" name="forecast_submit" value="Прогнозировать урожайность">
+            </form>
+            <input type="button" name="location_button" value="Определить местоположение" onclick="getLocationAndForecast()">
+            <form method="POST" action="/clear_history">
+                <input type="submit" name="clear_history" value="Очистить историю">
+            </form>
+            {% if forecast_result %}
+            <div class="response {{ forecast_result.yield_category }}">
+                <h3>Прогноз урожайности:</h3>
+                <p>Качество урожая: 
+                    {% if forecast_result.yield_category == 'excellent' %}Отличный
+                    {% elif forecast_result.yield_category == 'average' %}Средний
+                    {% else %}Плохой
+                    {% endif %}
+                </p>
+                <p>Местоположение: {{ location }}</p>
+                <p>Урожайность на гектар: {{ forecast_result.yield_per_ha }} т/га</p>
+                <p>Общая урожайность: {{ forecast_result.total_yield }} т</p>
+                <p>Корректировка по температуре: {{ forecast_result.temp_adjustment }}%</p>
+                <p>Корректировка по осадкам: {{ forecast_result.precip_adjustment }}%</p>
+                <p>Корректировка по типу почвы: {{ forecast_result.soil_adjustment }}%</p>
+                <p>Корректировка по удобрениям: {{ forecast_result.fertilizer_adjustment }}%</p>
+                {% if plot_data %}
+                <img src="data:image/png;base64,{{ plot_data }}" class="plot-img" alt="График урожайности">
+                {% endif %}
+                <div class="chart-container">
+                    <canvas id="yieldChart"></canvas>
+                </div>
+            </div>
+            {% endif %}
+            {% if forecast_error %}
+            <div class="response">
+                <h3>Ошибка:</h3>
+                <p>{{ forecast_error }}</p>
+            </div>
+            {% endif %}
+            {% if forecast_history %}
+            <div class="response">
+                <h3>История прогнозов:</h3>
+                <div class="filter-container">
+                    <label for="category-filter">Фильтр по качеству урожая: </label>
+                    <select id="category-filter" onchange="filterHistory()">
+                        <option value="all">Все</option>
+                        <option value="excellent">Отличный</option>
+                        <option value="average">Средний</option>
+                        <option value="poor">Плохой</option>
+                    </select>
+                </div>
+                <div class="history-table-container">
+                    <table class="history-table">
+                        <tr>
+                            <th>Культура</th>
+                            <th>Местоположение</th>
+                            <th>Температура (°C)</th>
+                            <th>Осадки (мм)</th>
+                            <th>Площадь (га)</th>
+                            <th>Тип почвы</th>
+                            <th>Уровень удобрений</th>
+                            <th>Урожайность (т/га)</th>
+                            <th>Общая урожайность (т)</th>
+                            <th>Дата</th>
+                        </tr>
+                        {% for forecast in forecast_history %}
+                        <tr class="{{ forecast.yield_category }}">
+                            <td>{{ forecast.crop }}</td>
+                            <td>{{ forecast.location }}</td>
+                            <td>{{ forecast.avg_temp }}</td>
+                            <td>{{ forecast.total_precipitation }}</td>
+                            <td>{{ forecast.area }}</td>
+                            <td>{{ forecast.soil_type }}</td>
+                            <td>{{ forecast.fertilizer_level }}</td>
+                            <td>{{ forecast.yield_per_ha }}</td>
+                            <td>{{ forecast.total_yield }}</td>
+                            <td>{{ forecast.timestamp }}</td>
+                        </tr>
+                        {% endfor %}
+                    </table>
+                </div>
+            </div>
+            {% endif %}
+        </div>
+    </section>
+    <script>
+        // Функция для переключения темы
+        function toggleTheme() {
+            const body = document.body;
+            if (body.classList.contains('light-theme')) {
+                body.classList.remove('light-theme');
+                body.classList.add('dark-theme');
+                localStorage.setItem('theme', 'dark');
+            } else {
+                body.classList.remove('dark-theme');
+                body.classList.add('light-theme');
+                localStorage.setItem('theme', 'light');
+            }
+        }
 
-# mypy
-.mypy_cache/
-.dmypy.json
-dmypy.json
+        // Загрузка сохранённой темы при загрузке страницы
+        document.addEventListener('DOMContentLoaded', function() {
+            const savedTheme = localStorage.getItem('theme') || 'light';
+            document.body.classList.add(savedTheme + '-theme');
+        });
 
-# Pyre type checker
-.pyre/
+        function updateTime() {
+            const now = new Date();
+            const day = String(now.getDate()).padStart(2, '0');
+            const month = String(now.getMonth() + 1).padStart(2, '0');
+            const year = now.getFullYear();
+            const hours = String(now.getHours()).padStart(2, '0');
+            const minutes = String(now.getMinutes()).padStart(2, '0');
+            const seconds = String(now.getSeconds()).padStart(2, '0');
+            const timeString = `Текущее время: ${day}.${month}.${year} ${hours}:${minutes}:${seconds}`;
+            document.getElementById('current-time').textContent = timeString;
+        }
+        setInterval(updateTime, 1000);
+        updateTime();
 
-# pytype static type analyzer
-.pytype/
+        function validateForecastForm() {
+            const avgTemp = parseFloat(document.getElementById('avg-temp').value);
+            const totalPrecip = parseFloat(document.getElementById('total-precipitation').value);
+            const area = parseFloat(document.getElementById('area').value);
+            if (avgTemp < -50 || avgTemp > 50) {
+                alert('Средняя температура должна быть в диапазоне от -50°C до 50°C!');
+                return false;
+            }
+            if (totalPrecip < 0) {
+                alert('Количество осадков не может быть отрицательным!');
+                return false;
+            }
+            if (area <= 0) {
+                alert('Площадь поля должна быть положительной!');
+                return false;
+            }
+            return true;
+        }
 
-# Cython debug symbols
-cython_debug/
+        function getLocationAndForecast() {
+            const crop = document.querySelector('select[name="crop"]').value;
+            const area = document.querySelector('input[name="area"]').value;
+            const soil_type = document.querySelector('select[name="soil_type"]').value;
+            const fertilizer_level = document.querySelector('select[name="fertilizer_level"]').value;
 
-# PyCharm
-#  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
-#  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
-#  and can be added to the global gitignore or merged into this file.  For a more nuclear
-#  option (not recommended) you can uncomment the following to ignore the entire idea folder.
-#.idea/
+            if (!crop || !area || !soil_type || !fertilizer_level) {
+                alert('Пожалуйста, заполните все поля перед определением местоположения!');
+                return;
+            }
 
-# Ruff stuff:
-.ruff_cache/
+            const locationButton = document.querySelector('input[name="location_button"]');
+            locationButton.disabled = true;
+            locationButton.value = 'Определяем местоположение...';
 
-# PyPI configuration file
-.pypirc
+            if (navigator.geolocation) {
+                navigator.geolocation.getCurrentPosition(
+                    function(position) {
+                        const latitude = position.coords.latitude;
+                        const longitude = position.coords.longitude;
+                        if (latitude === undefined || latitude === null || longitude === undefined || longitude === null) {
+                            alert('Не удалось определить координаты. Пожалуйста, попробуйте снова.');
+                            locationButton.disabled = false;
+                            locationButton.value = 'Определить местоположение';
+                            return;
+                        }
+
+                        fetch(`/forecast_by_location?latitude=${latitude}&longitude=${longitude}`, {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify({
+                                crop: crop,
+                                area: area,
+                                soil_type: soil_type,
+                                fertilizer_level: fertilizer_level
+                            })
+                        })
+                        .then(response => response.json())
+                        .then(data => {
+                            locationButton.disabled = false;
+                            locationButton.value = 'Определить местоположение';
+                            if (data.error) {
+                                alert(data.error);
+                            } else {
+                                window.location.reload();
+                            }
+                        })
+                        .catch(error => {
+                            locationButton.disabled = false;
+                            locationButton.value = 'Определить местоположение';
+                            alert('Ошибка при запросе прогноза: ' + error);
+                        });
+                    },
+                    function(error) {
+                        locationButton.disabled = false;
+                        locationButton.value = 'Определить местоположение';
+                        let errorMessage = 'Ошибка определения местоположения: ';
+                        switch(error.code) {
+                            case error.PERMISSION_DENIED:
+                                errorMessage += 'Пользователь отклонил запрос на геолокацию. Пожалуйста, разрешите доступ к геолокации в настройках браузера.';
+                                break;
+                            case error.POSITION_UNAVAILABLE:
+                                errorMessage += 'Информация о местоположении недоступна. Убедитесь, что геолокация включена на вашем устройстве.';
+                                break;
+                            case error.TIMEOUT:
+                                errorMessage += 'Истекло время ожидания запроса геолокации. Попробуйте снова.';
+                                break;
+                            default:
+                                errorMessage += 'Произошла неизвестная ошибка.';
+                                break;
+                        }
+                        alert(errorMessage);
+                    },
+                    {
+                        enableHighAccuracy: true,
+                        timeout: 10000,
+                        maximumAge: 0
+                    }
+                );
+            } else {
+                locationButton.disabled = false;
+                locationButton.value = 'Определить местоположение';
+                alert('Геолокация не поддерживается вашим браузером.');
+            }
+        }
+
+        function filterHistory() {
+            const filterValue = document.getElementById('category-filter').value;
+            const rows = document.querySelectorAll('.history-table tr:not(:first-child)');
+
+            rows.forEach(row => {
+                const category = row.classList.contains('excellent') ? 'excellent' :
+                                row.classList.contains('average') ? 'average' :
+                                row.classList.contains('poor') ? 'poor' : '';
+                if (filterValue === 'all' || category === filterValue) {
+                    row.style.display = '';
+                } else {
+                    row.style.display = 'none';
+                }
+            });
+        }
+
+        {% if forecast_result %}
+        document.addEventListener('DOMContentLoaded', function() {
+            const ctx = document.getElementById('yieldChart').getContext('2d');
+            new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: {{ forecast_result.plot_data.temp_range | tojson }},
+                    datasets: [{
+                        label: 'Урожайность (т/га)',
+                        data: {{ forecast_result.plot_data.yield_values | tojson }},
+                        borderColor: 'rgba(76, 175, 80, 1)',
+                        backgroundColor: 'rgba(76, 175, 80, 0.2)',
+                        fill: true
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    scales: {
+                        x: { title: { display: true, text: 'Температура (°C)' } },
+                        y: { title: { display: true, text: 'Урожайность (т/га)' } }
+                    }
+                }
+            });
+        });
+        {% endif %}
+    </script>
+</body>
+</html>
+"""
+
+@app.route('/')
+def home():
+    try:
+        forecast_history = get_forecast_history()
+        return render_template_string(HTML_TEMPLATE, forecast_history=forecast_history)
+    except Exception as e:
+        logger.error(f"Ошибка загрузки главной страницы: {e}")
+        return render_template_string(HTML_TEMPLATE, forecast_history=[], forecast_error=str(e))
+
+@app.route('/forecast_yield', methods=['POST'])
+def forecast_yield_route():
+    try:
+        crop = request.form.get('crop')
+        avg_temp = float(request.form.get('avg_temp'))
+        total_precipitation = float(request.form.get('total_precipitation'))
+        area = float(request.form.get('area'))
+        soil_type = request.form.get('soil_type')
+        fertilizer_level = request.form.get('fertilizer_level')
+
+        if not crop or not soil_type or not fertilizer_level:
+            return render_template_string(
+                HTML_TEMPLATE,
+                forecast_history=get_forecast_history(),
+                forecast_error="Ошибка: выберите культуру, тип почвы и уровень удобрений"
+            )
+
+        forecast_result, error = forecast_yield(crop, avg_temp, total_precipitation, area, soil_type, fertilizer_level)
+        if error:
+            return render_template_string(
+                HTML_TEMPLATE,
+                forecast_history=get_forecast_history(),
+                forecast_error=error
+            )
+
+        plot_data = generate_yield_plot(crop, forecast_result["plot_data"])
+        success, save_error = save_forecast(crop, avg_temp, total_precipitation, area, soil_type, fertilizer_level,
+                                            forecast_result)
+
+        if not success:
+            logger.error(f"Ошибка сохранения прогноза: {save_error}")
+
+        return render_template_string(
+            HTML_TEMPLATE,
+            forecast_result=forecast_result,
+            forecast_history=get_forecast_history(),
+            plot_data=plot_data,
+            location="Введено вручную"
+        )
+    except Exception as e:
+        logger.error(f"Ошибка в маршруте прогноза: {e}")
+        return render_template_string(
+            HTML_TEMPLATE,
+            forecast_history=get_forecast_history(),
+            forecast_error=f"Произошла ошибка: {str(e)}"
+        )
+
+@app.route('/forecast_by_location', methods=['POST'])
+def forecast_by_location():
+    try:
+        latitude_str = request.args.get('latitude')
+        longitude_str = request.args.get('longitude')
+        logger.info(f"Получены координаты: latitude={latitude_str}, longitude={longitude_str}")
+
+        if not latitude_str or not longitude_str:
+            logger.error("Параметры latitude и longitude отсутствуют")
+            return {"error": "Ошибка: параметры latitude и longitude отсутствуют"}, 400
+
+        try:
+            latitude = float(latitude_str)
+            longitude = float(longitude_str)
+        except (ValueError, TypeError) as e:
+            logger.error(f"Некорректные значения latitude или longitude: {e}")
+            return {"error": "Ошибка: некорректные значения latitude или longitude"}, 400
+
+        data = request.get_json()
+        crop = data.get('crop')
+        area_str = data.get('area')
+        soil_type = data.get('soil_type')
+        fertilizer_level = data.get('fertilizer_level')
+        logger.info(
+            f"Получены данные формы: crop={crop}, area={area_str}, soil_type={soil_type}, fertilizer_level={fertilizer_level}")
+
+        if not crop or not area_str or not soil_type or not fertilizer_level:
+            logger.error("Все поля формы должны быть заполнены")
+            return {"error": "Ошибка: все поля должны быть заполнены"}, 400
+
+        try:
+            area = float(area_str)
+        except (ValueError, TypeError) as e:
+            logger.error(f"Некорректное значение площади: {e}")
+            return {"error": "Ошибка: некорректное значение площади"}, 400
+
+        avg_temp, total_precipitation, location = estimate_climate_by_location(latitude, longitude)
+        logger.info(
+            f"Определены климатические параметры: avg_temp={avg_temp}, total_precipitation={total_precipitation}, location={location}")
+
+        forecast_result, error = forecast_yield(crop, avg_temp, total_precipitation, area, soil_type, fertilizer_level)
+        if error:
+            logger.error(f"Ошибка прогнозирования: {error}")
+            return {"error": error}, 400
+
+        plot_data = generate_yield_plot(crop, forecast_result["plot_data"])
+        success, save_error = save_forecast(crop, avg_temp, total_precipitation, area, soil_type, fertilizer_level,
+                                            forecast_result, location)
+
+        if not success:
+            logger.error(f"Ошибка сохранения прогноза: {save_error}")
+
+        logger.info(f"Прогноз успешно выполнен для {crop} в {location}")
+        return {
+            "forecast_result": forecast_result,
+            "plot_data": plot_data,
+            "location": location
+        }, 200
+    except Exception as e:
+        logger.error(f"Ошибка в маршруте прогноза по местоположению: {e}")
+        return {"error": str(e)}, 500
+
+@app.route('/clear_history', methods=['POST'])
+def clear_history():
+    try:
+        success, error = clear_forecast_history()
+        if not success:
+            return render_template_string(
+                HTML_TEMPLATE,
+                forecast_history=get_forecast_history(),
+                forecast_error=f"Ошибка очистки истории: {error}"
+            )
+        return render_template_string(
+            HTML_TEMPLATE,
+            forecast_history=get_forecast_history(),
+            forecast_message="История успешно очищена"
+        )
+    except Exception as e:
+        logger.error(f"Ошибка в маршруте очистки истории: {e}")
+        return render_template_string(
+            HTML_TEMPLATE,
+            forecast_history=get_forecast_history(),
+            forecast_error=f"Произошла ошибка: {str(e)}"
+        )
+
+if __name__ == "__main__":
+    init_forecast_file()
+    app.run(debug=True, host="0.0.0.0", port=5000)
